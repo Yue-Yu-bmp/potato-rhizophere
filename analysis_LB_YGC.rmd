@@ -1,0 +1,1870 @@
+---
+title: "analysis"
+output: yue yu
+---
+```{bash}
+cd potato4
+mkdir -p temp
+mkdir -p result
+
+time for i in `tail -n+2 metadata.txt | cut -f 1`;do
+vsearch --fastq_mergepairs cleandata_LB/${i}_1.fastq --reverse cleandata_LB/${i}_2.fastq \
+--fastqout temp/${i}.merged.fq --relabel ${i}.
+done
+cat temp/*.merged.fq > temp/all.fq
+ls -lsh temp/all.fq 
+head -n 4 temp/all.fq
+
+time vsearch --fastx_filter temp/all.fq \
+--fastq_stripleft 0 --fastq_stripright 0 \
+--fastq_maxee_rate 0.01 \
+--fastaout temp/filtered.fa
+
+head -n 2 temp/filtered.fa
+grep '>' temp/filtered.fa | head
+grep '>' temp/filtered.fa | wc -l
+
+time vsearch --derep_fulllength temp/filtered.fa \
+--output temp/uniques.fa --relabel Uni --minuniquesize 8 --sizeout
+
+ls -lsh temp/uniques.fa
+head -n 2 temp/uniques.fa
+
+vsearch --cluster_unoise temp/uniques.fa --centroids temp/cent.fa --consout temp/cons.fa --minsize 8 --strand both --sizeout --fasta_width 0 --clusterout_sort
+
+cut -f 1 -d ";" temp/cons.fa > temp/otus.fa
+sed -i 's/centroid=Uni/ASV/g' temp/otus.fa
+grep -o ">" temp/otus.fa  | wc -l
+
+mkdir -p result/raw
+time vsearch --uchime_ref temp/otus.fa \
+--db ../silva_16s_v123.fa \
+--nonchimeras result/raw/otus.fa
+
+nohup vsearch --usearch_global temp/filtered.fa --db result/raw/otus.fa \
+--otutabout result/raw/otutab.txt --id 0.97 --threads 64 &
+
+head result/raw/otutab.txt |cat -A
+grep -o "G" result/raw/otutab.txt | wc -l
+
+time vsearch --sintax result/raw/otus.fa --db ../rdp_16s_v16_sp.fa \
+--tabbedout result/raw/otus.sintax --sintax_cutoff 0.6 
+
+cp result/raw/otutab.txt result/
+cp result/raw/otus.fa result/
+cp result/raw/otus.sintax result/
+  
+cut -f 1,4 result/otus.sintax \
+|sed 's/\td/\tk/;s/:/__/g;s/,/;/g;s/"//g;s/\/Chloroplast//' \
+> result/taxonomy2.txt
+head -n3 result/taxonomy2.txt
+
+awk 'BEGIN{OFS=FS="\t"}{delete a; a["k"]="Unassigned";a["p"]="Unassigned";a["c"]="Unassigned";a["o"]="Unassigned";a["f"]="Unassigned";a["g"]="Unassigned";a["s"]="Unassigned";\
+      split($2,x,";");for(i in x){split(x[i],b,"__");a[b[1]]=b[2];} \
+      print $1,a["k"],a["p"],a["c"],a["o"],a["f"],a["g"],a["s"];}' \
+result/taxonomy2.txt > temp/otus.tax
+sed 's/;/\t/g;s/.__//g;' temp/otus.tax|cut -f 1-8 | \
+sed '1 s/^/OTUID\tKingdom\tPhylum\tClass\tOrder\tFamily\tGenus\tSpecies\n/' \
+> result/taxonomy.txt
+head -n3 result/taxonomy.txt
+```
+
+```{r}
+pkgs=c("tidyverse","dplyr", "reshape2", "ggplot2", "phyloseq","shiny","grid","scales", "randomForest", "devtools", "dplyr","ade4","ggnetwork", "intergraph", "scales","phyloseqGraphTest","genefilter", "ade4","vegan","gridExtra","Biostrings","amplicon","RColorBrewer","cowplot","amplicon","microbiome","data.table","ggpubr")
+for(pkg in pkgs){ suppressPackageStartupMessages(library(pkg, character.only = TRUE))}
+
+taxa=read.delim("result/taxonomy.txt",header=T,row.names=1,sep="\t")
+samd=read.table("metadata.txt",header=T,row.names=1,sep="\t")
+otutab=read.delim("result/otutab.txt",header=T,row.names=1,sep="\t")
+taxa=as.matrix(taxa)
+otutab=as.matrix(otutab)
+
+physeq<-phyloseq(tax_table(taxa),sample_data(samd),otu_table(otutab,taxa_are_rows = TRUE))
+
+library(ape)
+random_tree = rtree(ntaxa(physeq), rooted=TRUE, tip.label=taxa_names(physeq))
+plot(random_tree)
+
+physeq <- merge_phyloseq(physeq, random_tree)
+
+table(tax_table(physeq)[, "Phylum"], exclude = NULL)
+physeq <- subset_taxa(physeq,Kingdom == "Bacteria"  & Family != "mitochondria" 
+                      & Family != "Mitochondria" & Class != "Chloroplast" & Phylum !="Chloroflexi" & Phylum!="Cyanobacteria/Chloroplast" & Phylum!="Unassigned")
+physeq <- filter_taxa(physeq, function(x) sum(x > 3) > ((3/580)*length(x)), TRUE)
+physeq
+
+sort(sample_sums(physeq))
+
+physeq = prune_samples(sample_sums(physeq)>=3000, physeq)%>%prune_taxa(taxa_sums(.) > 0, .)
+physeq
+saveRDS(physeq, "rds/physeq.rds")
+
+set.seed(1)
+physeq_rare <- rarefy_even_depth(physeq, sample.size = min(sample_sums(physeq)) ,rngseed = FALSE,trimOTUs = TRUE)
+saveRDS(physeq_rare, "rds/physeq_rare.rds")
+
+ps=readRDS("rds/physeq.rds")
+ps_rare=readRDS("rds/physeq_rare.rds")
+ps_rare_genus=tax_glom(ps_rare, taxrank="Genus", NArm=FALSE)%>% prune_taxa(taxa_sums(.) > 0, .)
+saveRDS(ps_rare_genus, "rds/physeq_rare_genus.rds")
+
+ps=readRDS("rds/physeq.rds")
+ps_rare=readRDS("rds/physeq_rare.rds")
+ps_rare_genus=readRDS("rds/physeq_rare_genus.rds")
+
+write.table(otu_table(ps),file="otutab_frds/otutab_frds.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps),file="taxonomy_frds/taxonomy_frds.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps),file="metadata_frds/metadata_frds.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+write.table(otu_table(ps_rare),file="otutab_frds/otutab_frds_rare.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare),file="taxonomy_frds/taxonomy_frds_rare.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare),file="metadata_frds/metadata_frds_rare.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+write.table(otu_table(ps_rare_genus),file="otutab_frds/otutab_frds_rare_genus.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_genus),file="taxonomy_frds/taxonomy_frds_rare_genus.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_genus),file="metadata_frds/metadata_frds_rare_genus.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+```
+
+```{bash}
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_genus.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_genus.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_genus.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_phylum.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_phylum.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_phylum.txt
+
+cut -f 1 otutab_frds/otutab_frds_rare.txt | tail -n+2 > temp/otutab_frds_rare.id
+usearch -fastx_getseqs result/raw/otus.fa \
+        -labels temp/otutab_frds_rare.id \
+        -fastaout result/otus_frds_rare.fa
+awk 'NR==FNR{a[$1]=$0}NR>FNR{print a[$1]}'\
+        result/raw/otus.sintax temp/otutab_frds_rare.id \
+        > result/otus_frds_rare.sintax
+        sed -i 's/\t$/\td:Unassigned/' result/otus_frds_rare.sintax
+cut -f 1,4 result/otus_frds_rare.sintax \
+      |sed 's/\td/\tk/;s/:/__/g;s/,/;/g;s/"//g;s/\/Chloroplast//' \
+      > result/taxonomy2_frds_rare.txt
+    head -n3 result/taxonomy2_frds_rare.txt
+
+cut -f 1 otutab_frds/otutab_frds_rare_YN.txt | tail -n+2 > temp/otutab_frds_rare_YN.id
+usearch -fastx_getseqs result/raw/otus.fa \
+        -labels temp/otutab_frds_rare_YN.id \
+        -fastaout result/otus_frds_rare_YN.fa
+awk 'NR==FNR{a[$1]=$0}NR>FNR{print a[$1]}'\
+        result/raw/otus.sintax temp/otutab_frds_rare_YN.id \
+        > result/otus_frds_rare_YN.sintax
+        sed -i 's/\t$/\td:Unassigned/' result/otus_frds_rare_YN.sintax
+cut -f 1,4 result/otus_frds_rare_YN.sintax \
+      |sed 's/\td/\tk/;s/:/__/g;s/,/;/g;s/"//g;s/\/Chloroplast//' \
+      > result/taxonomy2_frds_rare_YN.txt
+    head -n3 result/taxonomy2_frds_rare_YN.txt
+
+cut -f 1 otutab_frds/otutab_frds_rare_GZ.txt | tail -n+2 > temp/otutab_frds_rare_GZ.id
+usearch -fastx_getseqs result/raw/otus.fa \
+        -labels temp/otutab_frds_rare_GZ.id \
+        -fastaout result/otus_frds_rare_GZ.fa
+awk 'NR==FNR{a[$1]=$0}NR>FNR{print a[$1]}'\
+        result/raw/otus.sintax temp/otutab_frds_rare_GZ.id \
+        > result/otus_frds_rare_GZ.sintax
+        sed -i 's/\t$/\td:Unassigned/' result/otus_frds_rare_GZ.sintax
+cut -f 1,4 result/otus_frds_rare_GZ.sintax \
+      |sed 's/\td/\tk/;s/:/__/g;s/,/;/g;s/"//g;s/\/Chloroplast//' \
+      > result/taxonomy2_frds_rare_GZ.txt
+    head -n3 result/taxonomy2_frds_rare_GZ.txt
+
+cut -f 1 otutab_frds/otutab_frds_rare_SC.txt | tail -n+2 > temp/otutab_frds_rare_SC.id
+usearch -fastx_getseqs result/raw/otus.fa \
+        -labels temp/otutab_frds_rare_SC.id \
+        -fastaout result/otus_frds_rare_SC.fa
+awk 'NR==FNR{a[$1]=$0}NR>FNR{print a[$1]}'\
+        result/raw/otus.sintax temp/otutab_frds_rare_SC.id \
+        > result/otus_frds_rare_SC.sintax
+        sed -i 's/\t$/\td:Unassigned/' result/otus_frds_rare_SC.sintax
+cut -f 1,4 result/otus_frds_rare_SC.sintax \
+      |sed 's/\td/\tk/;s/:/__/g;s/,/;/g;s/"//g;s/\/Chloroplast//' \
+      > result/taxonomy2_frds_rare_SC.txt
+    head -n3 result/taxonomy2_frds_rare_SC.txt
+    
+cut -f 1 otutab_frds/otutab_frds_rare_YGC.txt | tail -n+2 > temp/otutab_frds_rare_YGC.id
+usearch -fastx_getseqs result/raw/otus.fa \
+        -labels temp/otutab_frds_rare_YGC.id \
+        -fastaout result/otus_frds_rare_YGC.fa
+awk 'NR==FNR{a[$1]=$0}NR>FNR{print a[$1]}'\
+        result/raw/otus.sintax temp/otutab_frds_rare_YGC.id \
+        > result/otus_frds_rare_YGC.sintax
+        sed -i 's/\t$/\td:Unassigned/' result/otus_frds_rare_YGC.sintax
+cut -f 1,4 result/otus_frds_rare_YGC.sintax \
+      |sed 's/\td/\tk/;s/:/__/g;s/,/;/g;s/"//g;s/\/Chloroplast//' \
+      > result/taxonomy2_frds_rare_YGC.txt
+    head -n3 result/taxonomy2_frds_rare_YGC.txt
+```
+
+```{r}
+pkgs=c("tidyverse","ggplot2", "phyloseq","grid","scales","microbiomeSeq", "devtools","igraph",
+       "vegan","cowplot")
+for(pkg in pkgs){ 
+  suppressPackageStartupMessages(library(pkg, character.only = TRUE))
+}
+
+ps_rare=readRDS("rds/physeq_rare.rds")
+ps_rare_genus=readRDS("rds/physeq_rare_genus.rds")
+
+ps_rare_Act=subset_taxa(ps_rare, Phylum %in% c("Actinobacteria"))
+ps_rare_Fir=subset_taxa(ps_rare, Phylum %in% c("Firmicutes"))
+ps_rare_Bact=subset_taxa(ps_rare,Phylum%in% c("Bacteroidetes"))
+
+saveRDS(ps_rare_Act, "rds/physeq_rare_Act.rds")
+saveRDS(ps_rare_Fir, "rds/physeq_rare_Fir.rds")
+saveRDS(ps_rare_Bact, "rds/physeq_rare_Bact.rds")
+
+write.table(otu_table(ps_rare_Act),file="otutab_frds/otutab_frds_rare_Act.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_Act),file="taxonomy_frds/taxonomy_frds_rare_Act.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_Act),file="metadata_frds/metadata_frds_rare_Act.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_Fir),file="otutab_frds/otutab_frds_rare_Fir.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_Fir),file="taxonomy_frds/taxonomy_frds_rare_Fir.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_Fir),file="metadata_frds/metadata_frds_rare_Fir.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_Bact),file="otutab_frds/otutab_frds_rare_Bact.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_Bact),file="taxonomy_frds/taxonomy_frds_rare_Bact.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_Bact),file="metadata_frds/metadata_frds_rare_Bact.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+ps_rare_YN=subset_samples(ps_rare, Site %in% c("Yunnan" )) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_genus_YN=subset_samples(ps_rare_genus, Site %in% c("Yunnan")) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_GZ=subset_samples(ps_rare, Site %in% c("Guizhou" )) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_genus_GZ=subset_samples(ps_rare_genus, Site %in% c("Guizhou"))%>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_SC=subset_samples(ps_rare, Site %in% c("Sichuan" ))%>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_genus_SC=subset_samples(ps_rare_genus, Site %in% c("Sichuan")) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_YGC=subset_samples(ps_rare, Site %in% c("Yunnan","Guizhou","Sichuan")) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_genus_YGC=subset_samples(ps_rare_genus, Site %in% c("Yunnan","Guizhou","Sichuan" )) %>% prune_taxa(taxa_sums(.) > 0, .)
+
+ps_rare_YGC_phylum=tax_glom(ps_rare_YGC, taxrank="Phylum", NArm=FALSE)%>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_YN_phylum=tax_glom(ps_rare_YN, taxrank="Phylum", NArm=FALSE)%>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_GZ_phylum=tax_glom(ps_rare_GZ, taxrank="Phylum", NArm=FALSE)%>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_SC_phylum=tax_glom(ps_rare_SC, taxrank="Phylum", NArm=FALSE)%>% prune_taxa(taxa_sums(.) > 0, .)
+
+
+ps_rare_genus_YN_LB_U=subset_samples(ps_rare_genus_YN, LB %in% c("U")) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_genus_YN_LB_D=subset_samples(ps_rare_genus_YN, LB %in% c("D")) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_genus_GZ_LB_U=subset_samples(ps_rare_genus_GZ, LB %in% c("U")) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_genus_GZ_LB_D=subset_samples(ps_rare_genus_GZ, LB %in% c("D")) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_genus_SC_LB_U=subset_samples(ps_rare_genus_SC, LB %in% c("U")) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_SC_LB_D=subset_samples(ps_rare_SC, LB %in% c("D" )) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_genus_SC_LB_D=subset_samples(ps_rare_genus_SC, LB %in% c("D")) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_genus_YGC_LB_U=subset_samples(ps_rare_genus_YGC, LB %in% c("U" )) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_genus_YGC_LB_D=subset_samples(ps_rare_genus_YGC, LB %in% c("D" )) %>% prune_taxa(taxa_sums(.) > 0, .)
+
+
+saveRDS(ps_rare_YN, "rds/physeq_rare_YN.rds")
+saveRDS(ps_rare_genus_YN, "rds/physeq_rare_genus_YN.rds")
+
+write.table(otu_table(ps_rare_YN),file="otutab_frds/otutab_frds_rare_YN.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_YN),file="taxonomy_frds/taxonomy_frds_rare_YN.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_YN),file="metadata_frds/metadata_frds_rare_YN.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_genus_YN),file="otutab_frds/otutab_frds_rare_genus_YN.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_genus_YN),file="taxonomy_frds/taxonomy_frds_rare_genus_YN.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_genus_YN),file="metadata_frds/metadata_frds_rare_genus_YN.txt", row.names=TRUE, col.names=TRUE, sep="\t") 
+
+saveRDS(ps_rare_GZ, "rds/physeq_rare_GZ.rds")
+saveRDS(ps_rare_genus_GZ, "rds/physeq_rare_genus_GZ.rds")
+
+write.table(otu_table(ps_rare_GZ),file="otutab_frds/otutab_frds_rare_GZ.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_GZ),file="taxonomy_frds/taxonomy_frds_rare_GZ.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_GZ),file="metadata_frds/metadata_frds_rare_GZ.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_genus_GZ),file="otutab_frds/otutab_frds_rare_genus_GZ.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_genus_GZ),file="taxonomy_frds/taxonomy_frds_rare_genus_GZ.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_genus_GZ),file="metadata_frds/metadata_frds_rare_genus_GZ.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+saveRDS(ps_rare_SC, "rds/physeq_rare_SC.rds")
+saveRDS(ps_rare_genus_SC, "rds/physeq_rare_genus_SC.rds")
+
+write.table(otu_table(ps_rare_SC),file="otutab_frds/otutab_frds_rare_SC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_SC),file="taxonomy_frds/taxonomy_frds_rare_SC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_SC),file="metadata_frds/metadata_frds_rare_SC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_genus_SC),file="otutab_frds/otutab_frds_rare_genus_SC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_genus_SC),file="taxonomy_frds/taxonomy_frds_rare_genus_SC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_genus_SC),file="metadata_frds/metadata_frds_rare_genus_SC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+saveRDS(ps_rare_YGC, "rds/physeq_rare_YGC.rds")
+saveRDS(ps_rare_genus_YGC, "rds/physeq_rare_genus_YGC.rds")
+
+write.table(otu_table(ps_rare_YGC),file="otutab_frds/otutab_frds_rare_YGC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_YGC),file="taxonomy_frds/taxonomy_frds_rare_YGC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_YGC),file="metadata_frds/metadata_frds_rare_YGC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_genus_YGC),file="otutab_frds/otutab_frds_rare_genus_YGC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_genus_YGC),file="taxonomy_frds/taxonomy_frds_rare_genus_YGC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_genus_YGC),file="metadata_frds/metadata_frds_rare_genus_YGC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+saveRDS(ps_rare_YGC_phylum, "rds/physeq_rare_YGC_phylum.rds")
+saveRDS(ps_rare_YN_phylum, "rds/physeq_rare_YN_phylum.rds")
+saveRDS(ps_rare_GZ_phylum, "rds/physeq_rare_GZ_phylum.rds")
+saveRDS(ps_rare_SC_phylum, "rds/physeq_rare_SC_phylum.rds")
+
+write.table(otu_table(ps_rare_YGC_phylum),file="otutab_frds/otutab_frds_rare_YGC_phylum.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_YGC_phylum),file="taxonomy_frds/taxonomy_frds_rare_YGC_phylum.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_YGC_phylum),file="metadata_frds/metadata_frds_rare_YGC_phylum.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+write.table(otu_table(ps_rare_YN_phylum),file="otutab_frds/otutab_frds_rare_YN_phylum.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_YN_phylum),file="taxonomy_frds/taxonomy_frds_rare_YN_phylum.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_YN_phylum),file="metadata_frds/metadata_frds_rare_YN_phylum.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+write.table(otu_table(ps_rare_GZ_phylum),file="otutab_frds/otutab_frds_rare_GZ_phylum.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_GZ_phylum),file="taxonomy_frds/taxonomy_frds_rare_GZ_phylum.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_GZ_phylum),file="metadata_frds/metadata_frds_rare_GZ_phylum.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+write.table(otu_table(ps_rare_SC_phylum),file="otutab_frds/otutab_frds_rare_SC_phylum.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_SC_phylum),file="taxonomy_frds/taxonomy_frds_rare_SC_phylum.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_SC_phylum),file="metadata_frds/metadata_frds_rare_SC_phylum.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+saveRDS(ps_rare_genus_YN_LB_U, "rds/physeq_rare_genus_YN_LB_U.rds")
+saveRDS(ps_rare_genus_YN_LB_D, "rds/physeq_rare_genus_YN_LB_D.rds")
+saveRDS(ps_rare_genus_GZ_LB_U, "rds/physeq_rare_genus_GZ_LB_U.rds")
+saveRDS(ps_rare_genus_GZ_LB_D, "rds/physeq_rare_genus_GZ_LB_D.rds")
+saveRDS(ps_rare_genus_SC_LB_U, "rds/physeq_rare_genus_SC_LB_U.rds")
+saveRDS(ps_rare_genus_SC_LB_D, "rds/physeq_rare_genus_SC_LB_D.rds")
+saveRDS(ps_rare_genus_YGC_LB_U, "rds/physeq_rare_genus_YGC_LB_U.rds")
+saveRDS(ps_rare_genus_YGC_LB_D, "rds/physeq_rare_genus_YGC_LB_D.rds")
+
+write.table(otu_table(ps_rare_genus_YN_LB_U),file="otutab_frds/otutab_frds_rare_genus_YN_LB_U.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_genus_YN_LB_U),file="taxonomy_frds/taxonomy_frds_rare_genus_YN_LB_U.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_genus_YN_LB_U),file="metadata_frds/metadata_frds_rare_genus_YN_LB_U.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_genus_YN_LB_D),file="otutab_frds/otutab_frds_rare_genus_YN_LB_D.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_genus_YN_LB_D),file="taxonomy_frds/taxonomy_frds_rare_genus_YN_LB_D.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_genus_YN_LB_D),file="metadata_frds/metadata_frds_rare_genus_YN_LB_D.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+write.table(otu_table(ps_rare_genus_GZ_LB_U),file="otutab_frds/otutab_frds_rare_genus_GZ_LB_U.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_genus_GZ_LB_U),file="taxonomy_frds/taxonomy_frds_rare_genus_GZ_LB_U.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_genus_GZ_LB_U),file="metadata_frds/metadata_frds_rare_genus_GZ_LB_U.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_genus_GZ_LB_D),file="otutab_frds/otutab_frds_rare_genus_GZ_LB_D.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_genus_GZ_LB_D),file="taxonomy_frds/taxonomy_frds_rare_genus_GZ_LB_D.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_genus_GZ_LB_D),file="metadata_frds/metadata_frds_rare_genus_GZ_LB_D.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+write.table(otu_table(ps_rare_genus_SC_LB_U),file="otutab_frds/otutab_frds_rare_genus_SC_LB_U.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_genus_SC_LB_U),file="taxonomy_frds/taxonomy_frds_rare_genus_SC_LB_U.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_genus_SC_LB_U),file="metadata_frds/metadata_frds_rare_genus_SC_LB_U.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_genus_SC_LB_D),file="otutab_frds/otutab_frds_rare_genus_SC_LB_D.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_genus_SC_LB_D),file="taxonomy_frds/taxonomy_frds_rare_genus_SC_LB_D.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_genus_SC_LB_D),file="metadata_frds/metadata_frds_rare_genus_SC_LB_D.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+write.table(otu_table(ps_rare_genus_YGC_LB_U),file="otutab_frds/otutab_frds_rare_genus_YGC_LB_U.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_genus_YGC_LB_U),file="taxonomy_frds/taxonomy_frds_rare_genus_YGC_LB_U.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_genus_YGC_LB_U),file="metadata_frds/metadata_frds_rare_genus_YGC_LB_U.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_genus_YGC_LB_D),file="otutab_frds/otutab_frds_rare_genus_YGC_LB_D.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_genus_YGC_LB_D),file="taxonomy_frds/taxonomy_frds_rare_genus_YGC_LB_D.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_genus_YGC_LB_D),file="metadata_frds/metadata_frds_rare_genus_YGC_LB_D.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+ps_rare_Act_YN=subset_samples(ps_rare_Act, Site %in% c("Yunnan" )) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_Act_GZ=subset_samples(ps_rare_Act, Site %in% c("Guizhou" )) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_Act_SC=subset_samples(ps_rare_Act, Site %in% c("Sichuan" ))%>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_Act_YGC=subset_samples(ps_rare_Act, Site %in% c("Yunnan","Guizhou","Sichuan")) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_Fir_YN=subset_samples(ps_rare_Fir, Site %in% c("Yunnan" )) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_Fir_GZ=subset_samples(ps_rare_Fir, Site %in% c("Guizhou" )) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_Fir_SC=subset_samples(ps_rare_Fir, Site %in% c("Sichuan" ))%>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_Fir_YGC=subset_samples(ps_rare_Fir, Site %in% c("Yunnan","Guizhou","Sichuan")) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_Bact_YN=subset_samples(ps_rare_Bact, Site %in% c("Yunnan" )) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_Bact_GZ=subset_samples(ps_rare_Bact, Site %in% c("Guizhou" )) %>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_Bact_SC=subset_samples(ps_rare_Bact, Site %in% c("Sichuan" ))%>% prune_taxa(taxa_sums(.) > 0, .)
+ps_rare_Bact_YGC=subset_samples(ps_rare_Bact, Site %in% c("Yunnan","Guizhou","Sichuan")) %>% prune_taxa(taxa_sums(.) > 0, .)
+
+saveRDS(ps_rare_Act_YN, "rds/physeq_rare_Act_YN.rds")
+saveRDS(ps_rare_Act_GZ, "rds/physeq_rare_Act_GZ.rds")
+saveRDS(ps_rare_Act_SC, "rds/physeq_rare_Act_SC.rds")
+saveRDS(ps_rare_Act_YGC, "rds/physeq_rare_Act_YGC.rds")
+saveRDS(ps_rare_Fir_YN, "rds/physeq_rare_Fir_YN.rds")
+saveRDS(ps_rare_Fir_GZ, "rds/physeq_rare_Fir_GZ.rds")
+saveRDS(ps_rare_Fir_SC, "rds/physeq_rare_Fir_SC.rds")
+saveRDS(ps_rare_Fir_YGC, "rds/physeq_rare_Fir_YGC.rds")
+saveRDS(ps_rare_Bact_YN, "rds/physeq_rare_Bact_YN.rds")
+saveRDS(ps_rare_Bact_GZ, "rds/physeq_rare_Bact_GZ.rds")
+saveRDS(ps_rare_Bact_SC, "rds/physeq_rare_Bact_SC.rds")
+saveRDS(ps_rare_Bact_YGC, "rds/physeq_rare_Bact_YGC.rds")
+
+write.table(otu_table(ps_rare_Act_YN),file="otutab_frds/otutab_frds_rare_Act_YN.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_Act_YN),file="taxonomy_frds/taxonomy_frds_rare_Act_YN.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_Act_YN),file="metadata_frds/metadata_frds_rare_Act_YN.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_Act_GZ),file="otutab_frds/otutab_frds_rare_Act_GZ.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_Act_GZ),file="taxonomy_frds/taxonomy_frds_rare_Act_GZ.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_Act_GZ),file="metadata_frds/metadata_frds_rare_Act_GZ.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_Act_SC),file="otutab_frds/otutab_frds_rare_Act_SC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_Act_SC),file="taxonomy_frds/taxonomy_frds_rare_Act_SC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_Act_SC),file="metadata_frds/metadata_frds_rare_Act_SC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_Act_YGC),file="otutab_frds/otutab_frds_rare_Act_YGC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_Act_YGC),file="taxonomy_frds/taxonomy_frds_rare_Act_YGC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_Act_YGC),file="metadata_frds/metadata_frds_rare_Act_YGC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+write.table(otu_table(ps_rare_Fir_YN),file="otutab_frds/otutab_frds_rare_Fir_YN.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_Fir_YN),file="taxonomy_frds/taxonomy_frds_rare_Fir_YN.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_Fir_YN),file="metadata_frds/metadata_frds_rare_Fir_YN.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_Fir_GZ),file="otutab_frds/otutab_frds_rare_Fir_GZ.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_Fir_GZ),file="taxonomy_frds/taxonomy_frds_rare_Fir_GZ.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_Fir_GZ),file="metadata_frds/metadata_frds_rare_Fir_GZ.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_Fir_SC),file="otutab_frds/otutab_frds_rare_Fir_SC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_Fir_SC),file="taxonomy_frds/taxonomy_frds_rare_Fir_SC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_Fir_SC),file="metadata_frds/metadata_frds_rare_Fir_SC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_Fir_YGC),file="otutab_frds/otutab_frds_rare_Fir_YGC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_Fir_YGC),file="taxonomy_frds/taxonomy_frds_rare_Fir_YGC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_Fir_YGC),file="metadata_frds/metadata_frds_rare_Fir_YGC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+
+write.table(otu_table(ps_rare_Bact_YN),file="otutab_frds/otutab_frds_rare_Bact_YN.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_Bact_YN),file="taxonomy_frds/taxonomy_frds_rare_Bact_YN.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_Bact_YN),file="metadata_frds/metadata_frds_rare_Bact_YN.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_Bact_GZ),file="otutab_frds/otutab_frds_rare_Bact_GZ.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_Bact_GZ),file="taxonomy_frds/taxonomy_frds_rare_Bact_GZ.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_Bact_GZ),file="metadata_frds/metadata_frds_rare_Bact_GZ.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_Bact_SC),file="otutab_frds/otutab_frds_rare_Bact_SC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_Bact_SC),file="taxonomy_frds/taxonomy_frds_rare_Bact_SC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_Bact_SC),file="metadata_frds/metadata_frds_rare_Bact_SC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(otu_table(ps_rare_Bact_YGC),file="otutab_frds/otutab_frds_rare_Bact_YGC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(tax_table(ps_rare_Bact_YGC),file="taxonomy_frds/taxonomy_frds_rare_Bact_YGC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+write.table(sample_data(ps_rare_Bact_YGC),file="metadata_frds/metadata_frds_rare_Bact_YGC.txt", row.names=TRUE, col.names=TRUE, sep="\t" )
+
+```
+
+```{bash}
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_Act.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_Act.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_Act.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_Fir.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_Fir.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_Fir.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_Bact.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_Bact.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_Bact.txt
+
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_YN.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_YN.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_YN.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_genus_YN.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_genus_YN.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_genus_YN.txt
+
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_GZ.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_GZ.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_GZ.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_genus_GZ.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_genus_GZ.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_genus_GZ.txt
+
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_SC.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_SC.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_SC.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_genus_SC.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_genus_SC.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_genus_SC.txt
+
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_YGC.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_YGC.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_YGC.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_genus_YGC.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_genus_YGC.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_genus_YGC.txt
+
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_genus_YN_LB_U.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_genus_YN_LB_U.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_genus_YN_LB_U.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_genus_YN_LB_D.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_genus_YN_LB_D.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_genus_YN_LB_D.txt
+
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_genus_GZ_LB_U.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_genus_GZ_LB_U.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_genus_GZ_LB_U.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_genus_GZ_LB_D.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_genus_GZ_LB_D.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_genus_GZ_LB_D.txt
+
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_genus_SC_LB_U.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_genus_SC_LB_U.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_genus_SC_LB_U.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_genus_SC_LB_D.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_genus_SC_LB_D.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_genus_SC_LB_D.txt
+
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_genus_YGC_LB_U.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_genus_YGC_LB_U.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_genus_YGC_LB_U.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_genus_YGC_LB_D.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_genus_YGC_LB_D.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_genus_YGC_LB_D.txt
+
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_Act_YN.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_Act_YN.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_Act_YN.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_Act_GZ.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_Act_GZ.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_Act_GZ.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_Act_SC.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_Act_SC.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_Act_SC.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_Act_YGC.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_Act_YGC.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_Act_YGC.txt
+
+
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_Fir_YN.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_Fir_YN.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_Fir_YN.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_Fir_GZ.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_Fir_GZ.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_Fir_GZ.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_Fir_SC.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_Fir_SC.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_Fir_SC.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_Fir_YGC.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_Fir_YGC.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_Fir_YGC.txt
+
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_Bact_YN.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_Bact_YN.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_Bact_YN.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_Bact_GZ.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_Bact_GZ.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_Bact_GZ.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_Bact_SC.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_Bact_SC.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_Bact_SC.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_Bact_YGC.txt
+sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_Bact_YGC.txt
+sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_Bact_YGC.txt
+
+usearch -alpha_div otutab_frds/otutab_frds_rare_YN.txt -output alpha/alpha_rare_YN.txt
+usearch -sintax_summary result/otus_frds_rare_YN.sintax       -otutabin otutab_frds/otutab_frds_rare_YN.txt       -rank p      -output tax/sum_p_rare_YN.txt 
+sed -i 's/(//g;s/)//g;s/\"//g;s/\#//g;s/\/Chloroplast//g' tax/sum_p_rare_YN.txt 
+
+usearch -alpha_div otutab_frds/otutab_frds_rare_GZ.txt -output alpha/alpha_rare_GZ.txt
+usearch -sintax_summary result/otus_frds_rare_GZ.sintax       -otutabin otutab_frds/otutab_frds_rare_GZ.txt       -rank p      -output tax/sum_p_rare_GZ.txt  
+sed -i 's/(//g;s/)//g;s/\"//g;s/\#//g;s/\/Chloroplast//g' tax/sum_p_rare_GZ.txt 
+
+usearch -alpha_div otutab_frds/otutab_frds_rare_SC.txt -output alpha/alpha_rare_SC.txt
+usearch -sintax_summary result/otus_frds_rare_SC.sintax       -otutabin otutab_frds/otutab_frds_rare_SC.txt       -rank p      -output tax/sum_p_rare_SC.txt 
+sed -i 's/(//g;s/)//g;s/\"//g;s/\#//g;s/\/Chloroplast//g' tax/sum_p_rare_SC.txt 
+
+usearch -alpha_div otutab_frds/otutab_frds_rare_YGC.txt -output alpha/alpha_rare_YGC.txt
+usearch -sintax_summary result/otus_frds_rare_YGC.sintax       -otutabin otutab_frds/otutab_frds_rare_YGC.txt       -rank p      -output tax/sum_p_rare_YGC.txt  
+sed -i 's/(//g;s/)//g;s/\"//g;s/\#//g;s/\/Chloroplast//g' tax/sum_p_rare_YGC.txt 
+```
+
+```{r}
+suppressWarnings(suppressMessages(library(amplicon)))
+library(lattice)
+library(survival)
+library(Formula)
+library(Hmisc)
+library(RColorBrewer)
+
+metadata = read.table("metadata_frds/metadata_frds_rare_YN.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_YN.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+tax_phylum = read.table(paste0("tax/sum_p_rare_genus_YN.txt"), header=T, row.names=1, sep="\t", comment.char="")
+p = tax_stackplot(tax_phylum, metadata, topN = 8, groupID = group, style = "group", sorted = "abundance")
+p = p + scale_fill_brewer(palette = "Set1")
+ggsave(paste0("tax/rare_YN_LB_color.pdf"), p, width = width, height = height, units = "mm")
+
+metadata = read.table("metadata_frds/metadata_frds_rare_GZ.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_GZ.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+tax_phylum = read.table(paste0("tax/sum_p_rare_genus_GZ.txt"), header=T, row.names=1, sep="\t", comment.char="")
+p = tax_stackplot(tax_phylum, metadata, topN = 8, groupID = group, style = "group", sorted = "abundance")
+p = p + scale_fill_brewer(palette = "Set1")
+ggsave(paste0("tax/rare_GZ_LB_color.pdf"), p, width = width, height = height, units = "mm")
+
+metadata = read.table("metadata_frds/metadata_frds_rare_SC.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_SC.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+tax_phylum = read.table(paste0("tax/sum_p_rare_genus_SC.txt"), header=T, row.names=1, sep="\t", comment.char="")
+p = tax_stackplot(tax_phylum, metadata, topN = 8, groupID = group, style = "group", sorted = "abundance")
+p = p + scale_fill_brewer(palette = "Set1")
+ggsave(paste0("tax/rare_SC_LB_color.pdf"), p, width = width, height = height, units = "mm")
+
+metadata = read.table("metadata_frds/metadata_frds_rare_YGC.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_YGC.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+tax_phylum = read.table(paste0("tax/sum_p_rare_genus_YGC.txt"), header=T, row.names=1, sep="\t", comment.char="")
+p = tax_stackplot(tax_phylum, metadata, topN = 8, groupID = group, style = "group", sorted = "abundance")
+p = p + scale_fill_brewer(palette = "Set1")
+ggsave(paste0("tax/rare_YGC_LB_color.pdf"), p, width = width, height = height, units = "mm")
+
+```
+
+```{bash}
+conda activate qiime2-2020.2
+awk '/^>/&&NR>1{print "";}{ printf "%s",/^>/ ? $0"\n":$0 }'  result/otus_frds_rare.fa > result/otus_frds_rare.fna
+qiime tools import --input-path result/otus_frds_rare.fna --output-path qiime/repseqs.qza --type 'FeatureData[Sequence]'
+#add “Feature ID” and ”Taxon” to the header of result/taxonomy2_frds_rare.txt ，and rename result/taxonomy2_frds_rare_qiime.txt
+qiime tools import --input-path result/taxonomy2_frds_rare_qiime.txt --output-path qiime/taxonomy.qza --type 'FeatureData[Taxonomy]'
+qiime phylogeny align-to-tree-mafft-fasttree --i-sequences qiime/repseqs.qza --o-alignment qiime/aligned-repseqs.qza --o-masked-alignment qiime/masked-aligned-repseqs.qza --o-tree qiime/unrooted-tree.qza --o-rooted-tree qiime/rooted-tree.qza
+
+awk '/^>/&&NR>1{print "";}{ printf "%s",/^>/ ? $0"\n":$0 }'  result/otus_frds_rare_YN.fa > result/otus_frds_rare_YN.fna
+qiime tools import --input-path result/otus_frds_rare_YN.fna --output-path qiime/repseqs_YN.qza --type 'FeatureData[Sequence]'
+#add “Feature ID” and ”Taxon” to the header of result/taxonomy2_frds_rare_YN.txt ，and rename result/taxonomy2_frds_rare_qiime_YN.txt
+qiime tools import --input-path result/taxonomy2_frds_rare_qiime_YN.txt --output-path qiime/taxonomy_YN.qza --type 'FeatureData[Taxonomy]'
+qiime phylogeny align-to-tree-mafft-fasttree --i-sequences qiime/repseqs_YN.qza --o-alignment qiime/aligned-repseqs_YN.qza --o-masked-alignment qiime/masked-aligned-repseqs_YN.qza --o-tree qiime/unrooted-tree_YN.qza --o-rooted-tree qiime/rooted-tree_YN.qza
+
+awk '/^>/&&NR>1{print "";}{ printf "%s",/^>/ ? $0"\n":$0 }'  result/otus_frds_rare_GZ.fa > result/otus_frds_rare_GZ.fna
+qiime tools import --input-path result/otus_frds_rare_GZ.fna --output-path qiime/repseqs_GZ.qza --type 'FeatureData[Sequence]'
+#add “Feature ID” and ”Taxon” to the header of result/taxonomy2_frds_rare_GZ.txt ，and rename result/taxonomy2_frds_rare_qiime_GZ.txt
+qiime tools import --input-path result/taxonomy2_frds_rare_qiime_GZ.txt --output-path qiime/taxonomy_GZ.qza --type 'FeatureData[Taxonomy]'
+qiime phylogeny align-to-tree-mafft-fasttree --i-sequences qiime/repseqs_GZ.qza --o-alignment qiime/aligned-repseqs_GZ.qza --o-masked-alignment qiime/masked-aligned-repseqs_GZ.qza --o-tree qiime/unrooted-tree_GZ.qza --o-rooted-tree qiime/rooted-tree_GZ.qza
+
+awk '/^>/&&NR>1{print "";}{ printf "%s",/^>/ ? $0"\n":$0 }'  result/otus_frds_rare_SC.fa > result/otus_frds_rare_SC.fna
+qiime tools import --input-path result/otus_frds_rare_SC.fna --output-path qiime/repseqs_SC.qza --type 'FeatureData[Sequence]'
+#add “Feature ID” and ”Taxon” to the header of result/taxonomy2_frds_rare_SC.txt ，and rename result/taxonomy2_frds_rare_qiime_SC.txt
+qiime tools import --input-path result/taxonomy2_frds_rare_qiime_SC.txt --output-path qiime/taxonomy_SC.qza --type 'FeatureData[Taxonomy]'
+qiime phylogeny align-to-tree-mafft-fasttree --i-sequences qiime/repseqs_SC.qza --o-alignment qiime/aligned-repseqs_SC.qza --o-masked-alignment qiime/masked-aligned-repseqs_SC.qza --o-tree qiime/unrooted-tree_SC.qza --o-rooted-tree qiime/rooted-tree_SC.qza
+
+biom convert -i otutab_frds/otutab_frds_rare_YN.txt -o biom/table_frds_rare_YN.biom --table-type="OTU table" --to-json
+qiime tools import --input-path biom/table_frds_rare_YN.biom --type 'FeatureTable[Frequency]' --input-format BIOMV100Format --output-path qiime/table/table_YN.qza
+qiime feature-table summarize --i-table qiime/table/table_YN.qza --o-visualization qiime/qzv/table_YN.qzv --m-sample-metadata-file metadata_frds/metadata_frds_rare_YN.txt
+qiime diversity core-metrics-phylogenetic --i-phylogeny qiime/rooted-tree_YN.qza --i-table qiime/table/table_YN.qza --p-sampling-depth 3065 --m-metadata-file metadata_frds/metadata_frds_rare_YN.txt  --output-dir qiime/diversity/rare_YN
+
+biom convert -i otutab_frds/otutab_frds_rare_GZ.txt -o biom/table_frds_rare_GZ.biom --table-type="OTU table" --to-json
+qiime tools import --input-path biom/table_frds_rare_GZ.biom --type 'FeatureTable[Frequency]' --input-format BIOMV100Format --output-path qiime/table/table_GZ.qza
+qiime feature-table summarize --i-table qiime/table/table_GZ.qza --o-visualization qiime/qzv/table_GZ.qzv --m-sample-metadata-file metadata_frds/metadata_frds_rare_GZ.txt
+qiime diversity core-metrics-phylogenetic --i-phylogeny qiime/rooted-tree_GZ.qza --i-table qiime/table/table_GZ.qza --p-sampling-depth 3065 --m-metadata-file metadata_frds/metadata_frds_rare_GZ.txt  --output-dir qiime/diversity/rare_GZ
+
+biom convert -i otutab_frds/otutab_frds_rare_SC.txt -o biom/table_frds_rare_SC.biom --table-type="OTU table" --to-json
+qiime tools import --input-path biom/table_frds_rare_SC.biom --type 'FeatureTable[Frequency]' --input-format BIOMV100Format --output-path qiime/table/table_SC.qza
+qiime feature-table summarize --i-table qiime/table/table_SC.qza --o-visualization qiime/qzv/table_SC.qzv --m-sample-metadata-file metadata_frds/metadata_frds_rare_SC.txt
+qiime diversity core-metrics-phylogenetic --i-phylogeny qiime/rooted-tree_SC.qza --i-table qiime/table/table_SC.qza --p-sampling-depth 3065 --m-metadata-file metadata_frds/metadata_frds_rare_SC.txt  --output-dir qiime/diversity/rare_SC 
+
+biom convert -i otutab_frds/otutab_frds_rare_YGC.txt -o biom/table_frds_rare_YGC.biom --table-type="OTU table" --to-json
+qiime tools import --input-path biom/table_frds_rare_YGC.biom --type 'FeatureTable[Frequency]' --input-format BIOMV100Format --output-path qiime/table/table_YGC.qza
+qiime feature-table summarize --i-table qiime/table/table_YGC.qza --o-visualization qiime/qzv/table_YGC.qzv --m-sample-metadata-file metadata_frds/metadata_frds_rare_YGC.txt
+qiime diversity core-metrics-phylogenetic --i-phylogeny qiime/rooted-tree.qza --i-table qiime/table/table_YGC.qza --p-sampling-depth 3065 --m-metadata-file metadata_frds/metadata_frds_rare_YGC.txt  --output-dir qiime/diversity/rare_YGC 
+
+conda deacticvate
+
+```
+
+```{r}
+pkgs=c("tidyverse","ggplot2", "phyloseq","grid","scales","microbiomeSeq", "devtools","igraph",
+       "vegan","cowplot")
+for(pkg in pkgs){ 
+  suppressPackageStartupMessages(library(pkg, character.only = TRUE))
+}
+
+ps_rare_YN=readRDS("rds/physeq_rare_YN.rds")
+metadata_rare_YN=data.frame(sample_data(ps_rare_YN)[,])
+weihted.dist = phyloseq::distance(ps_rare_YN, method="bray")
+adonis(weihted.dist ~ LB, data=metadata_rare_YN, permutations = 1000)
+
+ps_rare_GZ=readRDS("rds/physeq_rare_GZ.rds")
+metadata_rare_GZ=data.frame(sample_data(ps_rare_GZ)[,])
+weihted.dist = phyloseq::distance(ps_rare_GZ, method="bray")
+adonis(weihted.dist ~ LB, data=metadata_rare_GZ, permutations = 1000)
+
+ps_rare_SC=readRDS("rds/physeq_rare_SC.rds")
+metadata_rare_SC=data.frame(sample_data(ps_rare_SC)[,])
+weihted.dist = phyloseq::distance(ps_rare_SC, method="bray")
+adonis(weihted.dist ~ LB, data=metadata_rare_SC, permutations = 1000)
+
+ps_rare_YGC=readRDS("rds/physeq_rare_YGC.rds")
+metadata_rare_YGC=data.frame(sample_data(ps_rare_YGC)[,])
+weihted.dist = phyloseq::distance(ps_rare_YGC, method="bray")
+adonis(weihted.dist ~ LB, data=metadata_rare_YGC, permutations = 1000)
+```
+
+```{bash}
+
+####差异比较
+tail -n+2 tax/sum_p_rare_YGC.txt | grep -v 'Unassigned' | cut -f 1 | head -n10 > tax/tax_phylum_YGC.top
+tail -n+2 tax/sum_p_rare_YN.txt | grep -v 'Unassigned' | cut -f 1 | head -n10 > tax/tax_phylum_YN.top
+tail -n+2 tax/sum_p_rare_GZ.txt | grep -v 'Unassigned' | cut -f 1 | head -n10 > tax/tax_phylum_GZ.top
+tail -n+2 tax/sum_p_rare_SC.txt | grep -v 'Unassigned' | cut -f 1 | head -n10 > tax/tax_phylum_SC.top
+
+Rscript ../script/compare.R --input otutab_frds/otutab_frds_rare_genus_YN.txt --design metadata_frds/metadata_frds_rare_genus_YN.txt --taxonomy taxonomy_frds/taxonomy_frds_rare_genus_YN.txt --topNtax tax/tax_phylum_YN.top --group LB --compare U-D --output compare/genus_YN_LB_U_D/ --pvalue 0.05 --fdr 0.1 --width 8 --height 5 
+
+Rscript ../script/compare.R --input otutab_frds/otutab_frds_rare_genus_GZ.txt --design metadata_frds/metadata_frds_rare_genus_GZ.txt --taxonomy taxonomy_frds/taxonomy_frds_rare_genus_GZ.txt --topNtax tax/tax_phylum_GZ.top --group LB --compare U-D --output compare/genus_GZ_LB_U_D/ --pvalue 0.05 --fdr 0.1 --width 8 --height 5 
+
+Rscript ../script/compare.R --input otutab_frds/otutab_frds_rare_genus_SC.txt --design metadata_frds/metadata_frds_rare_genus_SC.txt --taxonomy taxonomy_frds/taxonomy_frds_rare_genus_SC.txt --topNtax tax/tax_phylum_SC.top --group LB --compare U-D --output compare/genus_SC_LB_U_D/ --pvalue 0.05 --fdr 0.1 --width 8 --height 5 
+
+Rscript ../script/compare.R --input otutab_frds/otutab_frds_rare_genus_YGC.txt --design metadata_frds/metadata_frds_rare_genus_YGC.txt --taxonomy taxonomy_frds/taxonomy_frds_rare_genus_YGC.txt --topNtax tax/tax_phylum_YGC.top --group LB --compare U-D --output compare/genus_YGC_LB_U_D/ --pvalue 0.05 --fdr 0.1 --width 8 --height 5 
+
+Rscript ../script/compare.R --input otutab_frds/otutab_frds_rare_YGC_phylum.txt --design metadata_frds/metadata_frds_rare_YGC_phylum.txt --taxonomy taxonomy_frds/taxonomy_frds_rare_YGC_phylum.txt --topNtax tax/tax_phylum.top --group LB --compare U-D --output compare/R_ClearDisease_YGC_phylum_LB_U_D/ --pvalue 0.05 --fdr 0.1 --width 8 --height 5 
+
+Rscript ../script/compare.R --input otutab_frds/otutab_frds_rare_YN_phylum.txt --design metadata_frds/metadata_frds_rare_YN_phylum.txt --taxonomy taxonomy_frds/taxonomy_frds_rare_YN_phylum.txt --topNtax tax/tax_phylum.top --group LB --compare U-D --output compare/R_ClearDisease_YN_phylum_LB_U_D/ --pvalue 0.05 --fdr 0.1 --width 8 --height 5 
+
+Rscript ../script/compare.R --input otutab_frds/otutab_frds_rare_GZ_phylum.txt --design metadata_frds/metadata_frds_rare_GZ_phylum.txt --taxonomy taxonomy_frds/taxonomy_frds_rare_GZ_phylum.txt --topNtax tax/tax_phylum.top --group LB --compare U-D --output compare/R_ClearDisease_GZ_phylum_LB_U_D/ --pvalue 0.05 --fdr 0.1 --width 8 --height 5 
+
+Rscript ../script/compare.R --input otutab_frds/otutab_frds_rare_SC_phylum.txt --design metadata_frds/metadata_frds_rare_SC_phylum.txt --taxonomy taxonomy_frds/taxonomy_frds_rare_SC_phylum.txt --topNtax tax/tax_phylum.top --group LB --compare U-D --output compare/R_ClearDisease_SC_phylum_LB_U_D/ --pvalue 0.05 --fdr 0.1 --width 8 --height 5 
+
+usearch -alpha_div otutab_frds/otutab_frds_rare_Act_YN.txt -output alpha/alpha_rare_Act_YN.txt
+usearch -alpha_div otutab_frds/otutab_frds_rare_Act_GZ.txt -output alpha/alpha_rare_Act_GZ.txt
+usearch -alpha_div otutab_frds/otutab_frds_rare_Act_SC.txt -output alpha/alpha_rare_Act_SC.txt
+usearch -alpha_div otutab_frds/otutab_frds_rare_Act_YGC.txt -output alpha/alpha_rare_Act_YGC.txt
+
+usearch -alpha_div otutab_frds/otutab_frds_rare_Fir_YN.txt -output alpha/alpha_rare_Fir_YN.txt
+usearch -alpha_div otutab_frds/otutab_frds_rare_Fir_GZ.txt -output alpha/alpha_rare_Fir_GZ.txt
+usearch -alpha_div otutab_frds/otutab_frds_rare_Fir_SC.txt -output alpha/alpha_rare_Fir_SC.txt
+usearch -alpha_div otutab_frds/otutab_frds_rare_Fir_YGC.txt -output alpha/alpha_rare_Fir_YGC.txt
+
+usearch -alpha_div otutab_frds/otutab_frds_rare_Bact_YN.txt -output alpha/alpha_rare_Bact_YN.txt
+usearch -alpha_div otutab_frds/otutab_frds_rare_Bact_GZ.txt -output alpha/alpha_rare_Bact_GZ.txt
+usearch -alpha_div otutab_frds/otutab_frds_rare_Bact_SC.txt -output alpha/alpha_rare_Bact_SC.txt
+usearch -alpha_div otutab_frds/otutab_frds_rare_Bact_YGC.txt -output alpha/alpha_rare_Bact_YGC.txt
+
+Rscript ../script/otu_mean.R --group Group --input otutab_frds/otutab_frds_rare_genus_YGC_LB_U.txt --design metadata_frds/metadata_frds_rare_genus_YGC_LB_U.txt   --output mean_frds/mean_frds_rare_genus_YGC_LB_U.txt
+
+awk 'BEGIN{OFS=FS="\t"}{if(FNR==1) {for(i=2;i<=NF;i++) a[i]=$i;} else {for(i=2;i<=NF;i++) if($i>0.1) print $1, a[i];}}'  mean_frds/mean_frds_rare_genus_YGC_LB_U.txt > exist/exist_frds_rare_genus_YGC_LB_U.txt
+
+Rscript ../script/otu_mean.R --group Group --input otutab_frds/otutab_frds_rare_genus_YGC_LB_D.txt --design metadata_frds/metadata_frds_rare_genus_YGC_LB_D.txt   --output mean_frds/mean_frds_rare_genus_YGC_LB_D.txt
+
+awk 'BEGIN{OFS=FS="\t"}{if(FNR==1) {for(i=2;i<=NF;i++) a[i]=$i;} else {for(i=2;i<=NF;i++) if($i>0.1) print $1, a[i];}}'  mean_frds/mean_frds_rare_genus_YGC_LB_D.txt > exist/exist_frds_rare_genus_YGC_LB_D.txt
+
+```
+
+```{r}
+suppressWarnings(suppressMessages(library(amplicon)))
+library(lattice)
+library(survival)
+library(Formula)
+library(Hmisc)
+
+metadata = read.table("metadata_frds/metadata_frds_rare_Act_YN.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_Act_YN.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+
+metadata = read.table("metadata_frds/metadata_frds_rare_Act_GZ.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_Act_GZ.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+
+metadata = read.table("metadata_frds/metadata_frds_rare_Act_SC.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_Act_SC.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+
+metadata = read.table("metadata_frds/metadata_frds_rare_Act_YGC.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_Act_YGC.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Act_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+
+metadata = read.table("metadata_frds/metadata_frds_rare_Fir_YN.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_Fir_YN.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+
+metadata = read.table("metadata_frds/metadata_frds_rare_Fir_GZ.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_Fir_GZ.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+
+metadata = read.table("metadata_frds/metadata_frds_rare_Fir_SC.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_Fir_SC.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+
+metadata = read.table("metadata_frds/metadata_frds_rare_Fir_YGC.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_Fir_YGC.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Fir_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+
+metadata = read.table("metadata_frds/metadata_frds_rare_Bact_YN.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_Bact_YN.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_YN_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+
+metadata = read.table("metadata_frds/metadata_frds_rare_Bact_GZ.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_Bact_GZ.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_GZ_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+
+metadata = read.table("metadata_frds/metadata_frds_rare_Bact_SC.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_Bact_SC.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_SC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+
+metadata = read.table("metadata_frds/metadata_frds_rare_Bact_YGC.txt", header=T, row.names=1, sep="\t", comment.char="", stringsAsFactors = F)
+group = "LB"
+metadata[[group]] = factor(metadata[[group]], levels = c("D","U"))
+alpha_div = read.table("alpha/alpha_rare_Bact_YGC.txt", header=T, row.names=1, sep="\t", comment.char="")
+colnames(alpha_div) = capitalize(colnames(alpha_div))
+width = 89
+height = 56
+alpha_index = "Shannon_e"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Chao1"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Richness"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+alpha_index = "Simpson"
+p = alpha_boxplot(alpha_div, index = alpha_index, metadata, groupID = group)
+ggsave(paste0("alpha/rare_Bact_YGC_LB_",alpha_index,".pdf"), p, width = width, height = height, units = "mm")
+
+```
+
+```{r}
+package_list <- c("reshape2","ggplot2","devtools","bindrcpp", "VennDiagram",
+                  "ggthemes","agricolae","dplyr","igraph", "psych","sqldf")
+
+for(p in package_list){
+  if(!suppressWarnings(suppressMessages(require(p, character.only = TRUE, quietly = TRUE, warn.conflicts = FALSE)))){
+    install.packages(p, repos=site)
+    suppressWarnings(suppressMessages(library(p, character.only = TRUE, quietly = TRUE, warn.conflicts = FALSE)))
+  }
+}
+
+package_list <- c("digest","AnnotationDbi", "impute", "GO.db", "preprocessCore","WGCNA","multtest")
+for(p in package_list){
+  if(!suppressWarnings(suppressMessages(require(p, character.only = TRUE, quietly = TRUE, warn.conflicts = FALSE)))){
+    source("https://bioconductor.org/biocLite.R")
+    biocLite(p)
+    suppressWarnings(suppressMessages(library(p, character.only = TRUE, quietly = TRUE, warn.conflicts = FALSE)))
+  }
+}
+source("../script/node_pro.R")
+source("../script/net_pro.R")
+source("../script/matrix2igraph.R")
+
+
+otu_sample_file <- "otutab_frds/otutab_frds_rare_genus_YGC_LB_U.txt"
+otu_tax_file<-"taxonomy_frds/taxonomy_frds_rare_genus_YGC_LB_U.txt"
+design_file<-"metadata_frds/metadata_frds_rare_genus_YGC_LB_U.txt"
+
+r.threshold=0.6
+p.threshold=0.01
+size=2
+gcol=2
+maxtaxnum=7
+glab=2
+
+otu <- read.table(otu_sample_file, header=T, row.names= 1, sep="\t", comment.char="") 
+otu<-t(otu)
+otu <- otu[,colSums(otu)/sum(otu)>=(0.1/500)]
+otu_tax <- read.table(otu_tax_file, header=T, row.names= 1, sep="\t", comment.char="")
+design <- read.table(design_file, header=T, row.names= 1, sep="\t")
+otu_tax<-as.data.frame(otu_tax[colnames(otu),])
+otu_abundance <- colSums(otu)
+otu_pro <- cbind(otu_tax,otu_abundance)
+
+igraph<-matrix2igraph(otu,r.threshold,p.threshold)
+igraph.weight <- E(igraph)$weight
+E(igraph)$weight <- NA
+sum(igraph.weight>0)
+sum(igraph.weight<0)
+E.color <- igraph.weight
+E.color <- ifelse(E.color>0, "red",ifelse(E.color<0, "blue","grey"))
+E(igraph)$color <- as.character(E.color)
+igraph.otu <- as.data.frame(otu_pro[V(igraph)$name,]) 
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+node.col<-igraph.otu[,gcol]
+node.col<-as.character(node.col)
+fre.tax <- names(sort(table(node.col),decreasing =T)[1:maxtaxnum])
+node.col[!(node.col %in% fre.tax)]<-"Rare_groups"
+node.col<-as.factor(node.col)
+otu.tax.levels<-levels(node.col)
+levels(node.col) <- rainbow(length(otu.tax.levels)) 
+V(igraph)$color <- as.character(node.col)
+
+pdf(file = "network_try/network_tax_rare_genus_YGC_LB_U.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+pdf(file = "network_try/network_withtaxlab_rare_genus_YGC_LB_U.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label.cex=0.3, 
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=1.3
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+pdf(file = "network_try/network_tax_layoutstar_rare_genus_YGC_LB_U.pdf",width = 13)
+
+set.seed(123)
+plot(igraph,main="Co-occurrence network",layout=layout.star,vertex.frame.color=NA,vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=2
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+fc <- cluster_fast_greedy(igraph,weights =NULL)
+modularity <- modularity(igraph,membership(fc))
+comps <- membership(fc)
+colbar <- rainbow(max(comps))
+V(igraph)$color <- colbar[comps] 
+
+pdf(file = "network_try/network_modules_rare_genus_YGC_LB_U.pdf")
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+dev.off()
+max(comps)
+
+E(igraph)$weight <-igraph.weight
+netpro_result<-net_pro(igraph)
+write.csv(netpro_result,"network_try/rare_genus_YGC_LB_U_igraph.network.pro.csv")
+nodepro_result<-node_pro(igraph)
+write.csv(nodepro_result,"network_try/rare_genus_YGC_LB_U_igraph.node.pro.csv")
+
+write_graph(igraph, "network_try/igraph_edgelist_rare_genus_YGC_LB_U.txt", format="edgelist")
+write_graph(igraph, "network_try/igraph_col_rare_genus_YGC_LB_U.txt", format="ncol")
+
+###
+otu_sample_file <- "otutab_frds/otutab_frds_rare_genus_YN_LB_U.txt"
+otu_tax_file<-"taxonomy_frds/taxonomy_frds_rare_genus_YN_LB_U.txt"
+design_file<-"metadata_frds/metadata_frds_rare_genus_YN_LB_U.txt"
+
+r.threshold=0.6
+p.threshold=0.01
+size=2
+gcol=2
+maxtaxnum=7
+glab=2
+
+otu <- read.table(otu_sample_file, header=T, row.names= 1, sep="\t", comment.char="") 
+otu<-t(otu)
+otu <- otu[,colSums(otu)/sum(otu)>=(0.1/500)]
+otu_tax <- read.table(otu_tax_file, header=T, row.names= 1, sep="\t", comment.char="")
+design <- read.table(design_file, header=T, row.names= 1, sep="\t")
+otu_tax<-as.data.frame(otu_tax[colnames(otu),])
+otu_abundance <- colSums(otu)
+otu_pro <- cbind(otu_tax,otu_abundance)
+
+igraph<-matrix2igraph(otu,r.threshold,p.threshold)
+igraph.weight <- E(igraph)$weight
+E(igraph)$weight <- NA
+sum(igraph.weight>0)
+sum(igraph.weight<0)
+E.color <- igraph.weight
+E.color <- ifelse(E.color>0, "red",ifelse(E.color<0, "blue","grey"))
+E(igraph)$color <- as.character(E.color)
+igraph.otu <- as.data.frame(otu_pro[V(igraph)$name,]) 
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+node.col<-igraph.otu[,gcol]
+node.col<-as.character(node.col)
+fre.tax <- names(sort(table(node.col),decreasing =T)[1:maxtaxnum])
+node.col[!(node.col %in% fre.tax)]<-"Rare_groups"
+node.col<-as.factor(node.col)
+otu.tax.levels<-levels(node.col)
+levels(node.col) <- rainbow(length(otu.tax.levels)) 
+V(igraph)$color <- as.character(node.col)
+
+pdf(file = "network_try/network_tax_rare_genus_YN_LB_U.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+pdf(file = "network_try/network_withtaxlab_rare_genus_YN_LB_U.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label.cex=0.3, 
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=1.3
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+pdf(file = "network_try/network_tax_layoutstar_rare_genus_YN_LB_U.pdf",width = 13)
+
+set.seed(123)
+plot(igraph,main="Co-occurrence network",layout=layout.star,vertex.frame.color=NA,vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=2
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+fc <- cluster_fast_greedy(igraph,weights =NULL)
+modularity <- modularity(igraph,membership(fc))
+comps <- membership(fc)
+colbar <- rainbow(max(comps))
+V(igraph)$color <- colbar[comps] 
+
+pdf(file = "network_try/network_modules_rare_genus_YN_LB_U.pdf")
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+dev.off()
+max(comps)
+
+E(igraph)$weight <-igraph.weight
+netpro_result<-net_pro(igraph)
+write.csv(netpro_result,"network_try/rare_genus_YN_LB_U_igraph.network.pro.csv")
+nodepro_result<-node_pro(igraph)
+write.csv(nodepro_result,"network_try/rare_genus_YN_LB_U_igraph.node.pro.csv")
+
+write_graph(igraph, "network_try/igraph_edgelist_rare_genus_YN_LB_U.txt", format="edgelist")
+write_graph(igraph, "network_try/igraph_col_rare_genus_YN_LB_U.txt", format="ncol")
+
+###
+otu_sample_file <- "otutab_frds/otutab_frds_rare_genus_GZ_LB_U.txt"
+otu_tax_file<-"taxonomy_frds/taxonomy_frds_rare_genus_GZ_LB_U.txt"
+design_file<-"metadata_frds/metadata_frds_rare_genus_GZ_LB_U.txt"
+
+r.threshold=0.6
+p.threshold=0.01
+size=2
+gcol=2
+maxtaxnum=7
+glab=2
+
+otu <- read.table(otu_sample_file, header=T, row.names= 1, sep="\t", comment.char="") 
+otu<-t(otu)
+otu <- otu[,colSums(otu)/sum(otu)>=(0.1/500)]
+otu_tax <- read.table(otu_tax_file, header=T, row.names= 1, sep="\t", comment.char="")
+design <- read.table(design_file, header=T, row.names= 1, sep="\t")
+otu_tax<-as.data.frame(otu_tax[colnames(otu),])
+otu_abundance <- colSums(otu)
+otu_pro <- cbind(otu_tax,otu_abundance)
+
+igraph<-matrix2igraph(otu,r.threshold,p.threshold)
+igraph.weight <- E(igraph)$weight
+E(igraph)$weight <- NA
+sum(igraph.weight>0)
+sum(igraph.weight<0)
+E.color <- igraph.weight
+E.color <- ifelse(E.color>0, "red",ifelse(E.color<0, "blue","grey"))
+E(igraph)$color <- as.character(E.color)
+igraph.otu <- as.data.frame(otu_pro[V(igraph)$name,]) 
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+node.col<-igraph.otu[,gcol]
+node.col<-as.character(node.col)
+fre.tax <- names(sort(table(node.col),decreasing =T)[1:maxtaxnum])
+node.col[!(node.col %in% fre.tax)]<-"Rare_groups"
+node.col<-as.factor(node.col)
+otu.tax.levels<-levels(node.col)
+levels(node.col) <- rainbow(length(otu.tax.levels)) 
+V(igraph)$color <- as.character(node.col)
+
+pdf(file = "network_try/network_tax_rare_genus_GZ_LB_U.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+pdf(file = "network_try/network_withtaxlab_rare_genus_GZ_LB_U.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label.cex=0.3, 
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=1.3
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+pdf(file = "network_try/network_tax_layoutstar_rare_genus_GZ_LB_U.pdf",width = 13)
+
+set.seed(123)
+plot(igraph,main="Co-occurrence network",layout=layout.star,vertex.frame.color=NA,vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=2
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+fc <- cluster_fast_greedy(igraph,weights =NULL)
+modularity <- modularity(igraph,membership(fc))
+comps <- membership(fc)
+colbar <- rainbow(max(comps))
+V(igraph)$color <- colbar[comps] 
+
+pdf(file = "network_try/network_modules_rare_genus_GZ_LB_U.pdf")
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+dev.off()
+max(comps)
+
+E(igraph)$weight <-igraph.weight
+netpro_result<-net_pro(igraph)
+write.csv(netpro_result,"network_try/rare_genus_GZ_LB_U_igraph.network.pro.csv")
+nodepro_result<-node_pro(igraph)
+write.csv(nodepro_result,"network_try/rare_genus_GZ_LB_U_igraph.node.pro.csv")
+
+write_graph(igraph, "network_try/igraph_edgelist_rare_genus_GZ_LB_U.txt", format="edgelist")
+write_graph(igraph, "network_try/igraph_col_rare_genus_GZ_LB_U.txt", format="ncol")
+
+###
+otu_sample_file <- "otutab_frds/otutab_frds_rare_genus_SC_LB_U.txt"
+otu_tax_file<-"taxonomy_frds/taxonomy_frds_rare_genus_SC_LB_U.txt"
+design_file<-"metadata_frds/metadata_frds_rare_genus_SC_LB_U.txt"
+
+r.threshold=0.7
+p.threshold=0.01
+size=2
+gcol=2
+maxtaxnum=7
+glab=2
+
+otu <- read.table(otu_sample_file, header=T, row.names= 1, sep="\t", comment.char="") 
+otu<-t(otu)
+otu <- otu[,colSums(otu)/sum(otu)>=(0.1/500)]
+otu_tax <- read.table(otu_tax_file, header=T, row.names= 1, sep="\t", comment.char="")
+design <- read.table(design_file, header=T, row.names= 1, sep="\t")
+otu_tax<-as.data.frame(otu_tax[colnames(otu),])
+otu_abundance <- colSums(otu)
+otu_pro <- cbind(otu_tax,otu_abundance)
+
+igraph<-matrix2igraph(otu,r.threshold,p.threshold)
+igraph.weight <- E(igraph)$weight
+E(igraph)$weight <- NA
+sum(igraph.weight>0)
+sum(igraph.weight<0)
+E.color <- igraph.weight
+E.color <- ifelse(E.color>0, "red",ifelse(E.color<0, "blue","grey"))
+E(igraph)$color <- as.character(E.color)
+igraph.otu <- as.data.frame(otu_pro[V(igraph)$name,]) 
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+node.col<-igraph.otu[,gcol]
+node.col<-as.character(node.col)
+fre.tax <- names(sort(table(node.col),decreasing =T)[1:maxtaxnum])
+node.col[!(node.col %in% fre.tax)]<-"Rare_groups"
+node.col<-as.factor(node.col)
+otu.tax.levels<-levels(node.col)
+levels(node.col) <- rainbow(length(otu.tax.levels)) 
+V(igraph)$color <- as.character(node.col)
+
+pdf(file = "network_try/network_tax_rare_genus_SC_LB_U.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+pdf(file = "network_try/network_withtaxlab_rare_genus_SC_LB_U.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label.cex=0.3, 
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=1.3
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+pdf(file = "network_try/network_tax_layoutstar_rare_genus_SC_LB_U.pdf",width = 13)
+
+set.seed(123)
+plot(igraph,main="Co-occurrence network",layout=layout.star,vertex.frame.color=NA,vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=2
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+fc <- cluster_fast_greedy(igraph,weights =NULL)
+modularity <- modularity(igraph,membership(fc))
+comps <- membership(fc)
+colbar <- rainbow(max(comps))
+V(igraph)$color <- colbar[comps] 
+
+pdf(file = "network_try/network_modules_rare_genus_SC_LB_U.pdf")
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+dev.off()
+max(comps)
+
+E(igraph)$weight <-igraph.weight
+netpro_result<-net_pro(igraph)
+write.csv(netpro_result,"network_try/rare_genus_SC_LB_U_igraph.network.pro.csv")
+nodepro_result<-node_pro(igraph)
+write.csv(nodepro_result,"network_try/rare_genus_SC_LB_U_igraph.node.pro.csv")
+
+write_graph(igraph, "network_try/igraph_edgelist_rare_genus_SC_LB_U.txt", format="edgelist")
+write_graph(igraph, "network_try/igraph_col_rare_genus_SC_LB_U.txt", format="ncol")
+
+
+###
+otu_sample_file <- "otutab_frds/otutab_frds_rare_genus_YGC_LB_D.txt"
+otu_tax_file<-"taxonomy_frds/taxonomy_frds_rare_genus_YGC_LB_D.txt"
+design_file<-"metadata_frds/metadata_frds_rare_genus_YGC_LB_D.txt"
+
+r.threshold=0.6
+p.threshold=0.01
+size=2
+gcol=2
+maxtaxnum=7
+glab=2
+
+otu <- read.table(otu_sample_file, header=T, row.names= 1, sep="\t", comment.char="") 
+otu<-t(otu)
+otu <- otu[,colSums(otu)/sum(otu)>=(0.1/500)]
+otu_tax <- read.table(otu_tax_file, header=T, row.names= 1, sep="\t", comment.char="")
+design <- read.table(design_file, header=T, row.names= 1, sep="\t")
+otu_tax<-as.data.frame(otu_tax[colnames(otu),])
+otu_abundance <- colSums(otu)
+otu_pro <- cbind(otu_tax,otu_abundance)
+
+igraph<-matrix2igraph(otu,r.threshold,p.threshold)
+igraph.weight <- E(igraph)$weight
+E(igraph)$weight <- NA
+sum(igraph.weight>0)
+sum(igraph.weight<0)
+E.color <- igraph.weight
+E.color <- ifelse(E.color>0, "red",ifelse(E.color<0, "blue","grey"))
+E(igraph)$color <- as.character(E.color)
+igraph.otu <- as.data.frame(otu_pro[V(igraph)$name,]) 
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+node.col<-igraph.otu[,gcol]
+node.col<-as.character(node.col)
+fre.tax <- names(sort(table(node.col),decreasing =T)[1:maxtaxnum])
+node.col[!(node.col %in% fre.tax)]<-"Rare_groups"
+node.col<-as.factor(node.col)
+otu.tax.levels<-levels(node.col)
+levels(node.col) <- rainbow(length(otu.tax.levels)) 
+V(igraph)$color <- as.character(node.col)
+
+pdf(file = "network_try/network_tax_rare_genus_YGC_LB_D.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+pdf(file = "network_try/network_withtaxlab_rare_genus_YGC_LB_D.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label.cex=0.3,
+     edge.width=1,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=1.3
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+pdf(file = "network_try/network_tax_layoutstar_rare_genus_YGC_LB_D.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",layout=layout.star,vertex.frame.color=NA,vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=2
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+fc <- cluster_fast_greedy(igraph,weights =NULL)
+modularity <- modularity(igraph,membership(fc))
+comps <- membership(fc)
+colbar <- rainbow(max(comps))
+V(igraph)$color <- colbar[comps] 
+
+pdf(file = "network_try/network_modules_rare_genus_YGC_LB_D.pdf")
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=1,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+dev.off()
+max(comps)
+
+E(igraph)$weight <-igraph.weight
+netpro_result<-net_pro(igraph)
+write.csv(netpro_result,"network_try/rare_genus_YGC_LB_D_igraph.network.pro.csv")
+nodepro_result<-node_pro(igraph)
+write.csv(nodepro_result,"network_try/rare_genus_YGC_LB_D_igraph.node.pro.csv")
+
+write_graph(igraph, "network_try/igraph_edgelist_rare_genus_YGC_LB_D.txt", format="edgelist")
+write_graph(igraph, "network_try/igraph_col_rare_genus_YGC_LB_D.txt", format="ncol")
+
+###
+otu_sample_file <- "otutab_frds/otutab_frds_rare_genus_YN_LB_D.txt"
+otu_tax_file<-"taxonomy_frds/taxonomy_frds_rare_genus_YN_LB_D.txt"
+design_file<-"metadata_frds/metadata_frds_rare_genus_YN_LB_D.txt"
+
+r.threshold=0.6
+p.threshold=0.01
+size=2
+gcol=2
+maxtaxnum=7
+glab=2
+
+otu <- read.table(otu_sample_file, header=T, row.names= 1, sep="\t", comment.char="") 
+otu<-t(otu)
+otu <- otu[,colSums(otu)/sum(otu)>=(0.1/500)]
+otu_tax <- read.table(otu_tax_file, header=T, row.names= 1, sep="\t", comment.char="")
+design <- read.table(design_file, header=T, row.names= 1, sep="\t")
+otu_tax<-as.data.frame(otu_tax[colnames(otu),])
+otu_abundance <- colSums(otu)
+otu_pro <- cbind(otu_tax,otu_abundance)
+
+igraph<-matrix2igraph(otu,r.threshold,p.threshold)
+igraph.weight <- E(igraph)$weight
+E(igraph)$weight <- NA
+sum(igraph.weight>0)
+sum(igraph.weight<0)
+E.color <- igraph.weight
+E.color <- ifelse(E.color>0, "red",ifelse(E.color<0, "blue","grey"))
+E(igraph)$color <- as.character(E.color)
+igraph.otu <- as.data.frame(otu_pro[V(igraph)$name,]) 
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+node.col<-igraph.otu[,gcol]
+node.col<-as.character(node.col)
+fre.tax <- names(sort(table(node.col),decreasing =T)[1:maxtaxnum])
+node.col[!(node.col %in% fre.tax)]<-"Rare_groups"
+node.col<-as.factor(node.col)
+otu.tax.levels<-levels(node.col)
+levels(node.col) <- rainbow(length(otu.tax.levels)) 
+V(igraph)$color <- as.character(node.col)
+
+pdf(file = "network_try/network_tax_rare_genus_YN_LB_D.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+pdf(file = "network_try/network_withtaxlab_rare_genus_YN_LB_D.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label.cex=0.3,
+     edge.width=1,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=1.3
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+pdf(file = "network_try/network_tax_layoutstar_rare_genus_YN_LB_D.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",layout=layout.star,vertex.frame.color=NA,vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=2
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+fc <- cluster_fast_greedy(igraph,weights =NULL)
+modularity <- modularity(igraph,membership(fc))
+comps <- membership(fc)
+colbar <- rainbow(max(comps))
+V(igraph)$color <- colbar[comps] 
+
+pdf(file = "network_try/network_modules_rare_genus_YN_LB_D.pdf")
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=1,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+dev.off()
+max(comps)
+
+E(igraph)$weight <-igraph.weight
+netpro_result<-net_pro(igraph)
+write.csv(netpro_result,"network_try/rare_genus_YN_LB_D_igraph.network.pro.csv")
+nodepro_result<-node_pro(igraph)
+write.csv(nodepro_result,"network_try/rare_genus_YN_LB_D_igraph.node.pro.csv")
+
+write_graph(igraph, "network_try/igraph_edgelist_rare_genus_YN_LB_D.txt", format="edgelist")
+write_graph(igraph, "network_try/igraph_col_rare_genus_YN_LB_D.txt", format="ncol")
+
+###
+otu_sample_file <- "otutab_frds/otutab_frds_rare_genus_GZ_LB_D.txt"
+otu_tax_file<-"taxonomy_frds/taxonomy_frds_rare_genus_GZ_LB_D.txt"
+design_file<-"metadata_frds/metadata_frds_rare_genus_GZ_LB_D.txt"
+
+r.threshold=0.6
+p.threshold=0.01
+size=2
+gcol=2
+maxtaxnum=7
+glab=2
+
+otu <- read.table(otu_sample_file, header=T, row.names= 1, sep="\t", comment.char="") 
+otu<-t(otu)
+otu <- otu[,colSums(otu)/sum(otu)>=(0.1/500)]
+otu_tax <- read.table(otu_tax_file, header=T, row.names= 1, sep="\t", comment.char="")
+design <- read.table(design_file, header=T, row.names= 1, sep="\t")
+otu_tax<-as.data.frame(otu_tax[colnames(otu),])
+otu_abundance <- colSums(otu)
+otu_pro <- cbind(otu_tax,otu_abundance)
+
+igraph<-matrix2igraph(otu,r.threshold,p.threshold)
+igraph.weight <- E(igraph)$weight
+E(igraph)$weight <- NA
+sum(igraph.weight>0)
+sum(igraph.weight<0)
+E.color <- igraph.weight
+E.color <- ifelse(E.color>0, "red",ifelse(E.color<0, "blue","grey"))
+E(igraph)$color <- as.character(E.color)
+igraph.otu <- as.data.frame(otu_pro[V(igraph)$name,]) 
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+node.col<-igraph.otu[,gcol]
+node.col<-as.character(node.col)
+fre.tax <- names(sort(table(node.col),decreasing =T)[1:maxtaxnum])
+node.col[!(node.col %in% fre.tax)]<-"Rare_groups"
+node.col<-as.factor(node.col)
+otu.tax.levels<-levels(node.col)
+levels(node.col) <- rainbow(length(otu.tax.levels)) 
+V(igraph)$color <- as.character(node.col)
+
+pdf(file = "network_try/network_tax_rare_genus_GZ_LB_D.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+pdf(file = "network_try/network_withtaxlab_rare_genus_GZ_LB_D.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label.cex=0.3,
+     edge.width=1,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=1.3
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+pdf(file = "network_try/network_tax_layoutstar_rare_genus_GZ_LB_D.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",layout=layout.star,vertex.frame.color=NA,vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=2
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+fc <- cluster_fast_greedy(igraph,weights =NULL)
+modularity <- modularity(igraph,membership(fc))
+comps <- membership(fc)
+colbar <- rainbow(max(comps))
+V(igraph)$color <- colbar[comps] 
+
+pdf(file = "network_try/network_modules_rare_genus_GZ_LB_D.pdf")
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=1,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+dev.off()
+max(comps)
+
+E(igraph)$weight <-igraph.weight
+netpro_result<-net_pro(igraph)
+write.csv(netpro_result,"network_try/rare_genus_GZ_LB_D_igraph.network.pro.csv")
+nodepro_result<-node_pro(igraph)
+write.csv(nodepro_result,"network_try/rare_genus_GZ_LB_D_igraph.node.pro.csv")
+
+write_graph(igraph, "network_try/igraph_edgelist_rare_genus_GZ_LB_D.txt", format="edgelist")
+write_graph(igraph, "network_try/igraph_col_rare_genus_GZ_LB_D.txt", format="ncol")
+
+###
+otu_sample_file <- "otutab_frds/otutab_frds_rare_genus_SC_LB_D.txt"
+otu_tax_file<-"taxonomy_frds/taxonomy_frds_rare_genus_SC_LB_D.txt"
+design_file<-"metadata_frds/metadata_frds_rare_genus_SC_LB_D.txt"
+
+r.threshold=0.7
+p.threshold=0.01
+size=2
+gcol=2
+maxtaxnum=7
+glab=2
+
+otu <- read.table(otu_sample_file, header=T, row.names= 1, sep="\t", comment.char="") 
+otu<-t(otu)
+otu <- otu[,colSums(otu)/sum(otu)>=(0.1/500)]
+otu_tax <- read.table(otu_tax_file, header=T, row.names= 1, sep="\t", comment.char="")
+design <- read.table(design_file, header=T, row.names= 1, sep="\t")
+otu_tax<-as.data.frame(otu_tax[colnames(otu),])
+otu_abundance <- colSums(otu)
+otu_pro <- cbind(otu_tax,otu_abundance)
+
+igraph<-matrix2igraph(otu,r.threshold,p.threshold)
+igraph.weight <- E(igraph)$weight
+E(igraph)$weight <- NA
+sum(igraph.weight>0)
+sum(igraph.weight<0)
+E.color <- igraph.weight
+E.color <- ifelse(E.color>0, "red",ifelse(E.color<0, "blue","grey"))
+E(igraph)$color <- as.character(E.color)
+igraph.otu <- as.data.frame(otu_pro[V(igraph)$name,]) 
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+node.col<-igraph.otu[,gcol]
+node.col<-as.character(node.col)
+fre.tax <- names(sort(table(node.col),decreasing =T)[1:maxtaxnum])
+node.col[!(node.col %in% fre.tax)]<-"Rare_groups"
+node.col<-as.factor(node.col)
+otu.tax.levels<-levels(node.col)
+levels(node.col) <- rainbow(length(otu.tax.levels)) 
+V(igraph)$color <- as.character(node.col)
+
+pdf(file = "network_try/network_tax_rare_genus_SC_LB_D.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+pdf(file = "network_try/network_withtaxlab_rare_genus_SC_LB_D.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label.cex=0.3,
+     edge.width=1,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=1.3
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+pdf(file = "network_try/network_tax_layoutstar_rare_genus_SC_LB_D.pdf",width = 13)
+set.seed(123)
+plot(igraph,main="Co-occurrence network",layout=layout.star,vertex.frame.color=NA,vertex.label=NA,
+     edge.width=0.5,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+legend(1.2,1.4, legend=otu.tax.levels,col=levels(node.col), pch=16,cex=1,bty="n")
+legend(1.2,0.8, legend=c("pos.cor","neg.cor"),col=c("red","blue"),lty=1,lwd=2, bty="n")
+
+dev.off()
+
+size=2
+igraph.size <- log(as.numeric(igraph.otu$otu_abundance),10)*size
+V(igraph)$size <- igraph.size
+
+fc <- cluster_fast_greedy(igraph,weights =NULL)
+modularity <- modularity(igraph,membership(fc))
+comps <- membership(fc)
+colbar <- rainbow(max(comps))
+V(igraph)$color <- colbar[comps] 
+
+pdf(file = "network_try/network_modules_rare_genus_SC_LB_D.pdf")
+set.seed(123)
+plot(igraph,main="Co-occurrence network",vertex.frame.color="blue",vertex.label=NA,
+     edge.width=1,edge.lty=1,edge.curved=TRUE,margin=c(0,0,0,0))
+dev.off()
+max(comps)
+
+E(igraph)$weight <-igraph.weight
+netpro_result<-net_pro(igraph)
+write.csv(netpro_result,"network_try/rare_genus_SC_LB_D_igraph.network.pro.csv")
+nodepro_result<-node_pro(igraph)
+write.csv(nodepro_result,"network_try/rare_genus_SC_LB_D_igraph.node.pro.csv")
+
+write_graph(igraph, "network_try/igraph_edgelist_rare_genus_SC_LB_D.txt", format="edgelist")
+write_graph(igraph, "network_try/igraph_col_rare_genus_SC_LB_D.txt", format="ncol")
+
+```
+
+```{bash}
+conda activate qiime2-2020.2
+
+qiime sample-classifier classify-samples --i-table qiime/table/table_YGC.qza --m-metadata-file metadata_frds/metadata_frds_rare_YGC.txt  --m-metadata-column LB --p-random-state 666 --p-n-jobs 30 --p-n-estimators 10000  --output-dir qiime/machinelearning/R_ClearDisease_YGC_LB 
+
+qiime metadata tabulate --m-input-file  qiime/machinelearning/R_ClearDisease_YGC_LB/feature_importance.qza --o-visualization qiime/machinelearning/R_ClearDisease_YGC_LB/feature_importance.qzv
+
+qiime taxa collapse --i-table qiime/table/table_YGC.qza --i-taxonomy qiime/taxonomy.qza --p-level 6 --o-collapsed-table qiime/table/table_YGC_genus.qza
+
+qiime sample-classifier classify-samples --i-table qiime/table/table_YGC_genus.qza --m-metadata-file metadata_frds/metadata_frds_rare_YGC.txt  --m-metadata-column LB --p-random-state 666 --p-n-jobs 30 --p-n-estimators 10000  --output-dir qiime/machinelearning/R_ClearDisease_YGC_LB_genus 
+
+qiime metadata tabulate --m-input-file  qiime/machinelearning/R_ClearDisease_YGC_LB_genus/feature_importance.qza --o-visualization qiime/machinelearning/R_ClearDisease_YGC_LB_genus/feature_importance.qzv
+
+```
+
