@@ -135,9 +135,6 @@ sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare.txt
 sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_genus.txt
 sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_genus.txt
 sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_genus.txt
-sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' otutab_frds/otutab_frds_rare_phylum.txt
-sed -i -e 's/"//g' -e  '1s/^/OTUID\t&/' taxonomy_frds/taxonomy_frds_rare_phylum.txt
-sed -i -e 's/"//g' -e  '1s/^/SampleID\t&/' metadata_frds/metadata_frds_rare_phylum.txt
 
 cut -f 1 otutab_frds/otutab_frds_rare.txt | tail -n+2 > temp/otutab_frds_rare.id
 usearch -fastx_getseqs result/raw/otus.fa \
